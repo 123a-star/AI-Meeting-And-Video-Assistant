@@ -1,1 +1,15 @@
 .env
+.env
+
+# Python virtual environment
+myenv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Downloaded audio/video files
+downloades/
+
+# Generated vector database
+vector_db/
