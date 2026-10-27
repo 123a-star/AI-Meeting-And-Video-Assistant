@@ -17,6 +17,16 @@ from core.extractor import (
 )
 from core.rag_engine import build_rag_chain, ask_question
 
+from streamlit_webrtc import webrtc_streamer, WebRtcMode
+
+from core.realtime_analyzer import (
+    RealtimeAudioBuffer,
+    transcribe_audio_bytes,
+    update_live_summary,
+    answer_live_question,
+)
+
+
 # ─── Page Config ────────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="AI Video Assistant",
@@ -312,64 +322,203 @@ label { color: var(--text-muted) !important; font-size: 0.8rem !important; }
 """, unsafe_allow_html=True)
 
 # ─── Session State Init ──────────────────────────────────────────────────────────
-for key, default in {
+DEFAULT_STATE = {
     "result": None,
     "chat_history": [],
     "processing": False,
     "pipeline_done": False,
     "pipeline_steps": {},
-}.items():
+    "realtime_buffer": None,
+    "realtime_transcript": "",
+    "realtime_summary": "",
+    "realtime_pending_summary": "",
+    "realtime_chunk_count": 0,
+    "realtime_chat_history": [],
+    "realtime_final_report": None,
+    "realtime_error": None,
+}
+
+for key, default in DEFAULT_STATE.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
+
 # ─── Helpers ────────────────────────────────────────────────────────────────────
 def step_status(steps: dict, key: str) -> str:
-    s = steps.get(key, "pending")
-    if s == "active":  return "dot-active"
-    if s == "done":    return "dot-done"
+    status = steps.get(key, "pending")
+    if status == "active":
+        return "dot-active"
+    if status == "done":
+        return "dot-done"
     return "dot-pending"
+
 
 def render_step_bar(label: str, key: str, icon: str):
     css = step_status(st.session_state.pipeline_steps, key)
-    st.markdown(f"""
-    <div class="status-bar">
-        <div class="status-dot {css}"></div>
-        <span>{icon} {label}</span>
-    </div>""", unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="status-bar">
+            <div class="status-dot {css}"></div>
+            <span>{icon} {label}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def append_realtime_transcript(text: str):
+    """Append one recognized segment to the full and pending transcripts."""
+    clean_text = (text or "").strip()
+    if not clean_text:
+        return
+
+    if st.session_state.realtime_transcript:
+        st.session_state.realtime_transcript += " " + clean_text
+    else:
+        st.session_state.realtime_transcript = clean_text
+
+    if st.session_state.realtime_pending_summary:
+        st.session_state.realtime_pending_summary += " " + clean_text
+    else:
+        st.session_state.realtime_pending_summary = clean_text
+
+
+def transcribe_realtime_chunk(audio_bytes: bytes, language: str):
+    """Transcribe a WAV chunk and update session state."""
+    text = transcribe_audio_bytes(audio_bytes, language=language)
+    if text:
+        append_realtime_transcript(text)
+        st.session_state.realtime_chunk_count += 1
+
+        # Refresh the live summary after every 5 successfully transcribed chunks.
+        if st.session_state.realtime_chunk_count % 5 == 0:
+            pending_text = st.session_state.realtime_pending_summary.strip()
+            if pending_text:
+                st.session_state.realtime_summary = update_live_summary(
+                    pending_text,
+                    st.session_state.realtime_summary,
+                )
+                st.session_state.realtime_pending_summary = ""
+
+
+def drain_realtime_audio(language: str, max_chunks: int | None = None):
+    """Transcribe queued audio chunks. If max_chunks is None, drain the full queue."""
+    buffer = st.session_state.realtime_buffer
+    processed = 0
+
+    while buffer is not None:
+        if max_chunks is not None and processed >= max_chunks:
+            break
+
+        audio_bytes = buffer.get_chunk()
+        if audio_bytes is None:
+            break
+
+        transcribe_realtime_chunk(audio_bytes, language)
+        processed += 1
+
+
+def flush_realtime_buffer(buffer):
+    """Return any final partial audio, including when the helper method is absent."""
+    if hasattr(buffer, "flush_pending"):
+        return buffer.flush_pending()
+
+    # Compatibility fallback for the realtime_analyzer.py version without flush_pending().
+    with buffer.lock:
+        if len(buffer.pending) == 0:
+            return None
+        samples = buffer.pending.copy()
+        buffer.pending = buffer.pending[:0]
+    return buffer._to_wav_bytes(samples)
+
+
+@st.fragment(run_every="1s")
+def realtime_processing_panel():
+    """Poll the microphone audio queue without rerunning the entire app."""
+    if st.session_state.realtime_buffer is None:
+        st.info("Microphone buffer initialize nahi hua. Page refresh karke dobara try karein.")
+        return
+
+    try:
+        # Limit each poll so the UI remains responsive if several chunks are queued.
+        drain_realtime_audio(
+            st.session_state.get("realtime_language", "english"),
+            max_chunks=3,
+        )
+    except Exception as exc:
+        st.session_state.realtime_error = str(exc)
+
+    if st.session_state.realtime_error:
+        st.error(f"Realtime processing error: {st.session_state.realtime_error}")
+
+    st.markdown("### Live Transcript")
+    transcript = st.session_state.realtime_transcript.strip()
+    if transcript:
+        st.code(transcript, language=None)
+    else:
+        st.info("Mic start karke bolna shuru karein. Transcript yahan aayega.")
+
+    st.markdown("### Live Summary")
+    summary = st.session_state.realtime_summary.strip()
+    if summary:
+        st.markdown(summary)
+    else:
+        st.caption("Summary pehle 5 audio chunks process hone ke baad update hogi.")
+
 
 # ─── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown('<div class="hero-title" style="font-size:1.6rem">🎬 AI<br>Video</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="hero-title" style="font-size:1.6rem">🎬 AI<br>Video</div>',
+        unsafe_allow_html=True,
+    )
     st.markdown('<div class="hero-sub">Meeting Intelligence</div>', unsafe_allow_html=True)
     st.markdown("---")
 
-    st.markdown('<span class="badge badge-purple">Input</span>', unsafe_allow_html=True)
-    source = st.text_input("YouTube URL or File Path", placeholder="https://youtube.com/watch?v=... or /path/to/file.mp4")
+    mode = st.radio(
+        "Realtime Meeting Analyzer",
+        ["Video Analysis", "Realtime Meeting Analyzer"],
+        key="analysis_mode",
+    )
 
-    language = st.selectbox("Language", ["english", "hinglish"], index=0)
+    if mode == "Video Analysis":
+        st.markdown('<span class="badge badge-purple">Input</span>', unsafe_allow_html=True)
+        source = st.text_input(
+            "YouTube URL or File Path",
+            placeholder="https://youtube.com/watch?v=... or /path/to/file.mp4",
+        )
+        language = st.selectbox("Language", ["english", "hinglish"], index=0)
+        run_btn = st.button("⚡  Analyse", use_container_width=True)
+    else:
+        source = ""
+        language = "english"
+        run_btn = False
 
-    run_btn = st.button("⚡  Analyse", use_container_width=True)
-
-    if st.session_state.pipeline_done:
+    if mode == "Video Analysis" and st.session_state.pipeline_done:
         st.markdown("---")
         st.markdown('<span class="badge badge-green">Pipeline Status</span>', unsafe_allow_html=True)
         for step, icon, label in [
-            ("audio",      "🔊", "Audio Processing"),
+            ("audio", "🔊", "Audio Processing"),
             ("transcript", "📝", "Transcription"),
-            ("title",      "🏷️", "Title Generation"),
-            ("summary",    "📋", "Summarisation"),
-            ("extract",    "🔍", "Extraction"),
-            ("rag",        "🧠", "RAG Engine"),
+            ("title", "🏷️", "Title Generation"),
+            ("summary", "📋", "Summarisation"),
+            ("extract", "🔍", "Extraction"),
+            ("rag", "🧠", "RAG Engine"),
         ]:
             render_step_bar(label, step, icon)
 
-# ─── Main Area ──────────────────────────────────────────────────────────────────
+
+# ─── Main Header ────────────────────────────────────────────────────────────────
 st.markdown('<div class="hero-title">AI Video Assistant</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-sub">Transcribe · Summarise · Chat with your meetings</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="hero-sub">Transcribe · Summarise · Chat with your meetings</div>',
+    unsafe_allow_html=True,
+)
 st.markdown("---")
 
-# ── Run Pipeline ────────────────────────────────────────────────────────────────
-if run_btn:
+
+# ─── Existing Video / Recorded Audio Pipeline ───────────────────────────────────
+if mode == "Video Analysis" and run_btn:
     if not source.strip():
         st.error("Please enter a YouTube URL or file path.")
     else:
@@ -404,9 +553,9 @@ if run_btn:
             update_step("summary", "done")
 
             update_step("extract", "active")
-            action_items  = extract_action_items(transcript)
-            decisions     = extract_key_decisions(transcript)
-            questions     = extract_questions(transcript)
+            action_items = extract_action_items(transcript)
+            decisions = extract_key_decisions(transcript)
+            questions = extract_questions(transcript)
             update_step("extract", "done")
 
             update_step("rag", "active")
@@ -428,17 +577,182 @@ if run_btn:
             progress_placeholder.empty()
             st.rerun()
 
-        except Exception as e:
-            for k in ["audio","transcript","title","summary","extract","rag"]:
-                if st.session_state.pipeline_steps.get(k) == "active":
-                    st.session_state.pipeline_steps[k] = "pending"
-            progress_placeholder.error(f"❌ Error: {e}")
+        except Exception as exc:
+            for key in ["audio", "transcript", "title", "summary", "extract", "rag"]:
+                if st.session_state.pipeline_steps.get(key) == "active":
+                    st.session_state.pipeline_steps[key] = "pending"
+            progress_placeholder.error(f"❌ Error: {exc}")
 
-# ── Results ──────────────────────────────────────────────────────────────────────
-if st.session_state.result:
+
+# ─── Realtime Meeting Analyzer ───────────────────────────────────────────────────
+if mode == "Realtime Meeting Analyzer":
+    st.markdown("## 🎙️ Realtime Meeting Analyzer")
+    st.write(
+        "Browser microphone se meeting ki audio capture hogi. Speech ko chhote chunks mein "
+        "transcribe kiya jayega, live summary update hogi, aur aap meeting ke baare mein "
+        "questions pooch sakte hain."
+    )
+    st.warning(
+        "Browser microphone capture hota hai, Google Meet/Zoom ka system audio automatically "
+        "nahi. Agar meeting speakers se sunai de rahi hai, mic unki audio capture kar sakta hai."
+    )
+
+    realtime_language = st.selectbox(
+        "Meeting language",
+        ["english", "hinglish"],
+        index=0,
+        key="realtime_language_select",
+    )
+    st.session_state.realtime_language = realtime_language
+
+    if st.session_state.realtime_buffer is None:
+        st.session_state.realtime_buffer = RealtimeAudioBuffer()
+
+    control_col1, control_col2 = st.columns([1, 2])
+    with control_col1:
+        reset_clicked = st.button("🧹 Start New Meeting / Reset", use_container_width=True)
+    with control_col2:
+        st.caption(
+            "Pehle Start par click karke microphone permission dein. Meeting khatam hone par "
+            "WebRTC widget ka Stop dabayein, phir Finish Meeting dabayein."
+        )
+
+    if reset_clicked:
+        st.session_state.realtime_buffer.reset()
+        st.session_state.realtime_transcript = ""
+        st.session_state.realtime_summary = ""
+        st.session_state.realtime_pending_summary = ""
+        st.session_state.realtime_chunk_count = 0
+        st.session_state.realtime_chat_history = []
+        st.session_state.realtime_final_report = None
+        st.session_state.realtime_error = None
+        st.rerun()
+
+    webrtc_ctx = webrtc_streamer(
+        key="realtime-meeting-microphone",
+        mode=WebRtcMode.SENDONLY,
+        audio_frame_callback=st.session_state.realtime_buffer.audio_frame_callback,
+        media_stream_constraints={"video": False, "audio": True},
+        async_processing=True,
+    )
+
+    st.caption("Microphone status: " + ("running" if webrtc_ctx.state.playing else "stopped"))
+    realtime_processing_panel()
+
+    st.markdown("---")
+    finish_clicked = st.button("🏁 Finish Meeting & Generate Report", use_container_width=True)
+
+    if finish_clicked:
+        if webrtc_ctx.state.playing:
+            st.warning("Pehle microphone widget ka Stop button dabayein, phir Finish Meeting karein.")
+        elif not st.session_state.realtime_transcript.strip() and st.session_state.realtime_buffer.audio_queue.empty():
+            st.warning("Abhi transcript nahi mila. Microphone start karke kuch boliye, phir finish karein.")
+        else:
+            try:
+                with st.spinner("Remaining audio process ho rahi hai aur final report ban rahi hai..."):
+                    buffer = st.session_state.realtime_buffer
+
+                    # Process all complete chunks first, in chronological order.
+                    drain_realtime_audio(realtime_language, max_chunks=None)
+
+                    # Process the final partial chunk, if any.
+                    remaining_audio = flush_realtime_buffer(buffer)
+                    if remaining_audio:
+                        transcribe_realtime_chunk(remaining_audio, realtime_language)
+
+                    full_transcript = st.session_state.realtime_transcript.strip()
+                    if not full_transcript:
+                        st.warning("Audio se speech detect nahi hui. Meeting mein dobara bolkar try karein.")
+                    else:
+                        final_title = generate_title(full_transcript)
+                        final_summary = summarize(full_transcript)
+                        final_actions = extract_action_items(full_transcript)
+                        final_decisions = extract_key_decisions(full_transcript)
+                        final_questions = extract_questions(full_transcript)
+
+                        st.session_state.realtime_summary = final_summary
+                        st.session_state.realtime_pending_summary = ""
+                        st.session_state.realtime_final_report = {
+                            "title": final_title,
+                            "summary": final_summary,
+                            "transcript": full_transcript,
+                            "action_items": final_actions,
+                            "key_decisions": final_decisions,
+                            "open_questions": final_questions,
+                        }
+            except Exception as exc:
+                st.session_state.realtime_error = str(exc)
+                st.error(f"Final report error: {exc}")
+
+    # Show final report if generated.
+    final_report = st.session_state.realtime_final_report
+    if final_report:
+        st.markdown("---")
+        st.markdown("## 📄 Final Meeting Report")
+        st.markdown(f"### {final_report['title']}")
+
+        report_col1, report_col2 = st.columns([3, 2], gap="medium")
+        with report_col1:
+            st.markdown("### 📋 Summary")
+            st.markdown(final_report["summary"])
+        with report_col2:
+            st.markdown("### 📝 Full Transcript")
+            st.text_area(
+                "Final transcript",
+                value=final_report["transcript"],
+                height=260,
+                key="realtime_final_transcript_display",
+                disabled=True,
+            )
+
+        action_col, decision_col, question_col = st.columns(3, gap="medium")
+        with action_col:
+            st.markdown("### ✅ Action Items")
+            st.markdown(final_report["action_items"])
+        with decision_col:
+            st.markdown("### 🔑 Key Decisions")
+            st.markdown(final_report["key_decisions"])
+        with question_col:
+            st.markdown("### ❓ Open Questions")
+            st.markdown(final_report["open_questions"])
+
+    # Q&A works on the transcript captured so far, even before the final report.
+    st.markdown("---")
+    st.markdown("## 💬 Ask the Live Meeting")
+    for message in st.session_state.realtime_chat_history:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    with st.form("realtime_meeting_question_form", clear_on_submit=True):
+        realtime_question = st.text_input(
+            "Ask a question",
+            placeholder="What decisions have been discussed so far?",
+        )
+        ask_clicked = st.form_submit_button("Ask Meeting")
+
+    if ask_clicked and realtime_question.strip():
+        try:
+            with st.spinner("Meeting transcript se answer dhoondh raha hoon..."):
+                answer = answer_live_question(
+                    st.session_state.realtime_transcript,
+                    realtime_question.strip(),
+                    st.session_state.realtime_summary,
+                )
+            st.session_state.realtime_chat_history.append(
+                {"role": "user", "content": realtime_question.strip()}
+            )
+            st.session_state.realtime_chat_history.append(
+                {"role": "assistant", "content": answer}
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Question answer error: {exc}")
+
+
+# ─── Recorded-Mode Results ──────────────────────────────────────────────────────
+if mode == "Video Analysis" and st.session_state.result:
     r = st.session_state.result
 
-    # Title banner
     st.markdown(f"""
     <div class="card">
         <div class="card-title">📌 Session Title</div>
@@ -447,9 +761,7 @@ if st.session_state.result:
         </div>
     </div>""", unsafe_allow_html=True)
 
-    # Top row: summary + transcript
     col1, col2 = st.columns([3, 2], gap="medium")
-
     with col1:
         st.markdown(f"""
         <div class="card">
@@ -459,11 +771,12 @@ if st.session_state.result:
 
     with col2:
         with st.expander("📝 Full Transcript", expanded=False):
-            st.markdown(f'<div class="transcript-box">{r["transcript"]}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="transcript-box">{r["transcript"]}</div>',
+                unsafe_allow_html=True,
+            )
 
-    # Second row: action items | decisions | questions
     c1, c2, c3 = st.columns(3, gap="medium")
-
     with c1:
         st.markdown(f"""
         <div class="card">
@@ -486,11 +799,11 @@ if st.session_state.result:
         </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
+    st.markdown(
+        """<div style="font-family:'Syne',sans-serif;font-size:1.2rem;font-weight:700;margin-bottom:1rem">💬 Chat with your Meeting</div>""",
+        unsafe_allow_html=True,
+    )
 
-    # ── RAG Chat ──────────────────────────────────────────────────────────────
-    st.markdown('<div style="font-family:\'Syne\',sans-serif;font-size:1.2rem;font-weight:700;margin-bottom:1rem">💬 Chat with your Meeting</div>', unsafe_allow_html=True)
-
-    # Chat history display
     if st.session_state.chat_history:
         chat_html = '<div class="chat-container">'
         for msg in st.session_state.chat_history:
@@ -506,7 +819,7 @@ if st.session_state.result:
                     <span class="chat-label bot-label">🤖 Assistant</span>
                     <div class="chat-bubble bot-bubble">{msg['content']}</div>
                 </div>"""
-        chat_html += '</div>'
+        chat_html += "</div>"
         st.markdown(chat_html, unsafe_allow_html=True)
     else:
         st.markdown("""
@@ -515,17 +828,21 @@ if st.session_state.result:
             <div style="color:var(--text-muted);font-size:0.85rem">Ask anything about your meeting transcript</div>
         </div>""", unsafe_allow_html=True)
 
-    # Chat input
     chat_col1, chat_col2 = st.columns([5, 1], gap="small")
     with chat_col1:
-        user_input = st.text_input("Your question", placeholder="What were the main decisions made?", label_visibility="collapsed")
+        user_input = st.text_input(
+            "Your question",
+            placeholder="What were the main decisions made?",
+            label_visibility="collapsed",
+            key="recorded_mode_question",
+        )
     with chat_col2:
         send_btn = st.button("Send →", use_container_width=True)
 
     if send_btn and user_input.strip():
         with st.spinner("Thinking…"):
             answer = ask_question(r["rag_chain"], user_input.strip())
-        st.session_state.chat_history.append({"role": "user",      "content": user_input.strip()})
+        st.session_state.chat_history.append({"role": "user", "content": user_input.strip()})
         st.session_state.chat_history.append({"role": "assistant", "content": answer})
         st.rerun()
 
@@ -534,8 +851,7 @@ if st.session_state.result:
             st.session_state.chat_history = []
             st.rerun()
 
-else:
-    # Empty state
+elif mode == "Video Analysis":
     st.markdown("""
     <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:5rem 2rem;text-align:center">
         <div style="font-size:4rem;margin-bottom:1rem">🎬</div>

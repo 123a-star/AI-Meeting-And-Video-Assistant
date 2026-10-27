@@ -13,3 +13,7 @@ downloades/
 
 # Generated vector database
 vector_db/
+.env
+myenv/
+__pycache__/
+*.py[cod]
