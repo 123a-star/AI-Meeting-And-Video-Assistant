@@ -436,7 +436,7 @@ def flush_realtime_buffer(buffer):
 def realtime_processing_panel():
     """Poll the microphone audio queue without rerunning the entire app."""
     if st.session_state.realtime_buffer is None:
-        st.info("Microphone buffer initialize nahi hua. Page refresh karke dobara try karein.")
+        st.info("Microphone buffer is not initialize.refresh the page and try again.")
         return
 
     try:
@@ -456,14 +456,14 @@ def realtime_processing_panel():
     if transcript:
         st.code(transcript, language=None)
     else:
-        st.info("Mic start karke bolna shuru karein. Transcript yahan aayega.")
+        st.info("start the mic and start speaking. Transcript will show here.")
 
     st.markdown("### Live Summary")
     summary = st.session_state.realtime_summary.strip()
     if summary:
         st.markdown(summary)
     else:
-        st.caption("Summary pehle 5 audio chunks process hone ke baad update hogi.")
+        st.caption("Summary will update after processing first five chunks.")
 
 
 # ─── Sidebar ────────────────────────────────────────────────────────────────────
@@ -588,13 +588,13 @@ if mode == "Video Analysis" and run_btn:
 if mode == "Realtime Meeting Analyzer":
     st.markdown("## 🎙️ Realtime Meeting Analyzer")
     st.write(
-        "Browser microphone se meeting ki audio capture hogi. Speech ko chhote chunks mein "
-        "transcribe kiya jayega, live summary update hogi, aur aap meeting ke baare mein "
-        "questions pooch sakte hain."
+        "Browser's microphone will capture the meeting audio."
+        "speech get transcribe into small chunks, live summary will be update"
+        "now you can ask questions regarding meeting."
     )
     st.warning(
-        "Browser microphone capture hota hai, Google Meet/Zoom ka system audio automatically "
-        "nahi. Agar meeting speakers se sunai de rahi hai, mic unki audio capture kar sakta hai."
+        "Browser microphone captures the sound."
+        "if meeting is audible into the microphone, mic can capture that audio if possible."
     )
 
     realtime_language = st.selectbox(
@@ -613,8 +613,8 @@ if mode == "Realtime Meeting Analyzer":
         reset_clicked = st.button("🧹 Start New Meeting / Reset", use_container_width=True)
     with control_col2:
         st.caption(
-            "Pehle Start par click karke microphone permission dein. Meeting khatam hone par "
-            "WebRTC widget ka Stop dabayein, phir Finish Meeting dabayein."
+            "first click on start and then provide the microphones permission.after ending the meeting"
+            " press WebRTC widget Stop,then click on the button finish meeting."
         )
 
     if reset_clicked:
@@ -644,12 +644,12 @@ if mode == "Realtime Meeting Analyzer":
 
     if finish_clicked:
         if webrtc_ctx.state.playing:
-            st.warning("Pehle microphone widget ka Stop button dabayein, phir Finish Meeting karein.")
+            st.warning("first press the microphone widgets stop button,then finish the meeting")
         elif not st.session_state.realtime_transcript.strip() and st.session_state.realtime_buffer.audio_queue.empty():
-            st.warning("Abhi transcript nahi mila. Microphone start karke kuch boliye, phir finish karein.")
+            st.warning("transcript not formed till now.start the microphone and speak something,then finish it.")
         else:
             try:
-                with st.spinner("Remaining audio process ho rahi hai aur final report ban rahi hai..."):
+                with st.spinner("Remaining audio is processing and final report is getting ready"):
                     buffer = st.session_state.realtime_buffer
 
                     # Process all complete chunks first, in chronological order.
@@ -662,7 +662,7 @@ if mode == "Realtime Meeting Analyzer":
 
                     full_transcript = st.session_state.realtime_transcript.strip()
                     if not full_transcript:
-                        st.warning("Audio se speech detect nahi hui. Meeting mein dobara bolkar try karein.")
+                        st.warning("speech not detected from audio.speak and try again.")
                     else:
                         final_title = generate_title(full_transcript)
                         final_summary = summarize(full_transcript)
@@ -732,7 +732,7 @@ if mode == "Realtime Meeting Analyzer":
 
     if ask_clicked and realtime_question.strip():
         try:
-            with st.spinner("Meeting transcript se answer dhoondh raha hoon..."):
+            with st.spinner("searching answer from meeting transcript..."):
                 answer = answer_live_question(
                     st.session_state.realtime_transcript,
                     realtime_question.strip(),
