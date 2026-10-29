@@ -1,5 +1,5 @@
 streamlit==1.63.0
-streamlit-webrtc
+streamlit-webrtc==0.79.0
 python-dotenv==1.2.3
 yt-dlp==2026.8.19
 pydub==0.25.1
@@ -22,3 +22,6 @@ torchvision==0.29.0
 numpy==2.5.3
 pillow==12.3.0
 tiktoken==0.14.0
+
+# Python 3.13 removed the stdlib audioop module; pydub may need this replacement.
+audioop-lts==0.2.2; python_version >= "3.13"
