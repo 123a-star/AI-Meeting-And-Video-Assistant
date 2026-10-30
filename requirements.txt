@@ -25,3 +25,4 @@ tiktoken==0.14.0
 
 # Python 3.13 removed the stdlib audioop module; pydub may need this replacement.
 audioop-lts==0.2.2; python_version >= "3.13"
+supabase
